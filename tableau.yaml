@@ -1,0 +1,269 @@
+kind: StatefulSet
+apiVersion: apps/v1
+metadata:
+  name: tableau
+  labels:
+    app: tableau
+    role: frontend
+  annotations:
+    ovn.kubernetes.io/ip_pool: 192.168.2.38/32
+spec:
+  serviceName: tableau-sts
+  revisionHistoryLimit: 10
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  volumeClaimTemplates:
+    #- kind: PersistentVolumeClaim
+    #  apiVersion: v1
+    #  metadata:
+    #    name: tableau-sts
+    #  spec:
+    #    accessModes:
+    #      - ReadWriteOnce
+    #    resources:
+    #      requests:
+    #        storage: 20Gi
+    #    volumeMode: Filesystem
+    - kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        name: tableau-backup
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+        volumeMode: Filesystem
+    #- kind: PersistentVolumeClaim
+    #  apiVersion: v1
+    #  metadata:
+    #    name: tableau-machine-id
+    #  spec:
+    #    accessModes:
+    #      - ReadWriteOnce
+    #    resources:
+    #      requests:
+    #        storage: 1Mi
+    #    volumeMode: Filesystem  
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: tableau
+        role: frontend
+      annotations:
+        restartTimestamp: "0"
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        app: tableau
+        stage: int
+      initContainers:
+        - resources:
+            limits:
+              cpu: '1'
+              memory: 12Gi
+            requests:
+              cpu: '1'
+              memory: 12Gi
+          terminationMessagePath: /dev/termination-log
+          name: set-volume-permissions-and-cleanup
+          command:
+            - /bin/bash
+            - '-c'
+            - |
+              set -x
+              set -Eeuo pipefail
+              if [ -z ${SCRATCH+x} ]; then
+                declare -rg SCRATCH=false
+                echo "Using defaul value. No install from scratch"
+              else
+                if [ "${SCRATCH}" = "true" ]; then
+                    declare -g SCRATCH=true
+                    echo "Install from scratch"
+                else
+                    declare -g SCRATCH=false
+                    echo "No install from scratch"
+                fi
+              fi              
+              # Data Dir
+              if ${SCRATCH}; then
+                rm -rf /mnt/*    
+              fi
+              # set permissions
+              mkdir -p /backup
+              # clearing bootstrap            
+              rm -rf /media/*
+              chown -R $UNPRIVILEGED_TABLEAU_UID:$UNPRIVILEGED_TABLEAU_GID /mnt
+              chown -R $UNPRIVILEGED_TABLEAU_UID:$UNPRIVILEGED_TABLEAU_GID /backup
+              chown -R $UNPRIVILEGED_TABLEAU_UID:$UNPRIVILEGED_TABLEAU_GID /srv
+              chown -R $UNPRIVILEGED_TABLEAU_UID:$UNPRIVILEGED_TABLEAU_GID /media
+              ls -la /mnt
+              ls -la /backup
+              ls -la /srv
+              ls -la /media
+              if [[ ! -f /etc/machine-id && "$MACHINE_ID" != "" ]]; then
+                echo "$MACHINE_ID" > /etc/machine-id
+                cat /etc/machine-id
+              fi              
+          securityContext:
+            privileged: true
+            runAsNonRoot: false
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: true
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: machine-id
+              mountPath: /etc
+            - name: tableau-sts
+              mountPath: /mnt
+            - name: tableau-backup
+              mountPath: /srv
+            - name: bootstrap
+              mountPath: /media
+          terminationMessagePolicy: File
+          envFrom:
+            - configMapRef:
+                name: tableau
+          image: 'reg.its.zz/docker.io/library/ubuntu:24.04'
+          workingDir: /mnt
+      serviceAccountName: useroot
+      imagePullSecrets:
+        - name: ecp-secret
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - resources:
+            limits:
+              cpu: '8'
+              memory: 128Gi
+            requests:
+              cpu: '8'
+              memory: 128Gi
+          readinessProbe:
+            exec:
+              command:
+                - /docker/server-ready-check
+            initialDelaySeconds: 1200
+            timeoutSeconds: 30
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          terminationMessagePath: /dev/termination-log
+          name: container-0
+          livenessProbe:
+            exec:
+              command:
+                - /docker/alive-check
+            initialDelaySeconds: 5400
+            timeoutSeconds: 30
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 3
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            #- name: machine-id
+            #  mountPath: /etc/machine-id
+            #  subPath: machine-id
+            - name: tableau-sts
+              mountPath: /var/opt/tableau
+            - name: config
+              readOnly: true
+              mountPath: /docker/config/config.json
+              subPath: config.json
+            - name: tableau-license
+              mountPath: /docker/config/activation
+            - name: bootstrap
+              mountPath: /docker/config/bootstrap
+            - name: tableau-startup
+              mountPath: /docker/customer-files/post_init_command
+              subPath: post_init_command
+            - name: scripts
+              mountPath: /docker/customer-files/scripts
+            - name: tableau-backup
+              mountPath: /backup
+          terminationMessagePolicy: File
+          env:
+            - name: ALWAYS_WRITE_BOOTSTRAP_FILE
+              value: '1'
+            - name: WAIT_FOR_BOOTSTRAP_FILE
+              value: '0'
+            - name: TABLEAU_LOG_LEVEL
+              value: "debug"
+            - name: TSM_LOG_LEVEL  
+              value: "debug"
+            - name: NATIVEAPI_LOG_LEVEL
+              value: "debug"
+          envFrom:
+            - configMapRef:
+                name: tableau
+            - secretRef:
+                name: tableau
+          image: 'reg.its.zz/ecp/tableau/tableau_server_image:20251.25.0825.1650'
+          workingDir: /var/opt/tableau
+      serviceAccount: useroot
+      volumes:
+        - name: config
+          configMap:
+            name: tableau-docker-configfile
+            defaultMode: 420
+        - name: tableau-license
+          projected:
+            sources:
+              - configMap:
+                  name: tableau-license
+                  items:
+                    - key: LICENSE_FILE
+                      path: OfflineActivationLicensingAtrs.zip
+            defaultMode: 420
+        - name: bootstrap
+          persistentVolumeClaim:
+            claimName: nfs-bootstrap-pvc
+        - name: tableau-startup
+          configMap:
+            name: tableau-startup
+            defaultMode: 493
+        - name: scripts
+          projected:
+            sources:
+              - configMap:
+                  name: tableau-scripts
+                  items:
+                    - key: backup-schedule.sh
+                      path: backup-schedule.sh
+                    - key: backup.sh
+                      path: backup.sh
+                    - key: cleanup.sh
+                      path: cleanup.sh
+                    - key: pgsql-auth.sh
+                      path: pgsql-auth.sh
+                    - key: backup-schedule.conf
+                      path: backup-schedule.conf
+                    - key: hba-config.sh
+                      path: hba-config.sh
+                    - key: hba-config.conf
+                      path: hba-config.conf
+                    - key: reconfigure.sh
+                      path: reconfigure.sh
+                      mode: 420
+            defaultMode: 493
+        - name: machine-id
+          emptyDir: {}
+        - name: tableau-sts
+          persistentVolumeClaim:
+            claimName: tableau-sts-tableau-0
+      dnsPolicy: ClusterFirst
+      priorityClassName: tableau
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+  selector:
+    matchLabels:
+      app: tableau
