@@ -14,17 +14,22 @@ spec:
     whenDeleted: Retain
     whenScaled: Retain
   volumeClaimTemplates:
-    #- kind: PersistentVolumeClaim
-    #  apiVersion: v1
-    #  metadata:
-    #    name: tableau-sts
-    #  spec:
-    #    accessModes:
-    #      - ReadWriteOnce
-    #    resources:
-    #      requests:
-    #        storage: 20Gi
-    #    volumeMode: Filesystem
+    - kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        name: tableau-sts
+        annotations:
+          pvc-autoscaler.mkihr.io/enabled: "true"
+          pvc-autoscaler.mkihr.io/threshold: "80%"
+          pvc-autoscaler.mkihr.io/ceiling: "200Gi"
+          pvc-autoscaler.mkihr.io/increase: "20%"
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+        volumeMode: Filesystem
     - kind: PersistentVolumeClaim
       apiVersion: v1
       metadata:
@@ -253,9 +258,6 @@ spec:
             defaultMode: 493
         - name: machine-id
           emptyDir: {}
-        - name: tableau-sts
-          persistentVolumeClaim:
-            claimName: tableau-sts-tableau-0
       dnsPolicy: ClusterFirst
       priorityClassName: tableau
   podManagementPolicy: OrderedReady
